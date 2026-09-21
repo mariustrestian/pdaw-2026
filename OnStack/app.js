@@ -9,6 +9,8 @@ const themeToggle = document.getElementById('theme-toggle');
     const fontFamilyToggle = document.getElementById('font-family-toggle');
     const fontFamilyMenu = document.getElementById('font-family-menu');
     const backgroundColor = document.getElementById('background-color');
+    const restoreDefaults = document.getElementById('restore-defaults');
+    const saveFile = document.getElementById('save-file');
     const selectionPanel = document.getElementById('selection-panel');
     const MIN_FONT_SIZE = 2;
     const MAX_FONT_SIZE = 160;
@@ -18,6 +20,11 @@ const themeToggle = document.getElementById('theme-toggle');
     let hasCustomTextColor = false;
     let preservingToolbarSelection = false;
     let suppressSelectionSync = false;
+    const formattingUndoStack = [];
+    const formattingRedoStack = [];
+    let restoringFormattingHistory = false;
+    const STORAGE_KEY = 'onstack-document';
+    let persistenceTimer = null;
     const formattingProperties = [
       'font-size', 'font-family', 'color', 'background-color',
       'font-weight', 'font-style', 'text-decoration-line'
@@ -32,6 +39,105 @@ const themeToggle = document.getElementById('theme-toggle');
       'Didot', 'Futura', 'Monaco', 'Optima', 'Courier'
     ];
     let selectedFontFamily = fontFamilies[0];
+
+    function saveDocument() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          html: content.innerHTML,
+          contentStyle: content.getAttribute('style') || '',
+          textColor: textColor.value,
+          textOpacity: textOpacity.value,
+          backgroundColor: backgroundColor.value,
+          darkTheme: document.body.classList.contains('dark'),
+          hasCustomTextColor,
+          selectedFontFamily
+        }));
+      } catch (error) {
+        console.error('OnStack could not save the document.', error);
+      }
+    }
+
+    function scheduleSave() {
+      clearTimeout(persistenceTimer);
+      persistenceTimer = setTimeout(saveDocument, 150);
+    }
+
+    function restoreDocument() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+        if (!saved) return;
+        if (typeof saved.html === 'string') content.innerHTML = saved.html;
+        if (typeof saved.contentStyle === 'string') {
+          if (saved.contentStyle) content.setAttribute('style', saved.contentStyle);
+          else content.removeAttribute('style');
+        }
+        if (typeof saved.textColor === 'string') textColor.value = saved.textColor;
+        if (typeof saved.textOpacity === 'string') textOpacity.value = saved.textOpacity;
+        if (typeof saved.backgroundColor === 'string') backgroundColor.value = saved.backgroundColor;
+        hasCustomTextColor = saved.hasCustomTextColor === true;
+        if (saved.darkTheme) {
+          document.body.classList.add('dark');
+          document.documentElement.classList.add('dark');
+        }
+        if (fontFamilies.includes(saved.selectedFontFamily)) {
+          selectedFontFamily = saved.selectedFontFamily;
+        }
+        opacityValue.textContent = `${textOpacity.value}%`;
+      } catch (error) {
+        console.error('OnStack could not restore the saved document.', error);
+      }
+    }
+
+    function restoreDefaultDocument() {
+      clearTimeout(persistenceTimer);
+      localStorage.removeItem(STORAGE_KEY);
+      content.innerHTML = '';
+      content.removeAttribute('style');
+      textColor.value = '#000000';
+      textOpacity.value = '100';
+      opacityValue.textContent = '100%';
+      backgroundColor.value = '#ffffff';
+      fontSize = DEFAULT_FONT_SIZE;
+      hasCustomTextColor = false;
+      selectedFontFamily = fontFamilies[0];
+      document.body.classList.remove('dark');
+      document.documentElement.classList.remove('dark');
+      themeToggle.innerHTML = '<svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6"></circle><path class="sun-rays" d="M16 2v5M16 25v5M2 16h5M25 16h5M6.1 6.1l3.5 3.5M22.4 22.4l3.5 3.5M25.9 6.1l-3.5 3.5M9.6 22.4l-3.5 3.5"></path></svg>';
+      themeToggle.setAttribute('aria-label', 'Switch to dark theme');
+      themeToggle.title = 'Switch to dark theme';
+      themeToggle.setAttribute('aria-pressed', 'false');
+      formattingUndoStack.length = 0;
+      formattingRedoStack.length = 0;
+      savedRange = null;
+      hideSelectionPanel();
+      updateFontControls();
+      setSelectedFontFamily(selectedFontFamily);
+      content.focus();
+    }
+
+    function downloadDocument() {
+      const contentStyle = content.getAttribute('style');
+      const styleAttribute = contentStyle
+        ? ` style="${contentStyle.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`
+        : '';
+      const exportedDocument = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OnStack Document</title>
+</head>
+<body>
+<main${styleAttribute}>${content.innerHTML}</main>
+</body>
+</html>`;
+      const blob = new Blob([exportedDocument], { type: 'text/html;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'onstack-document.html';
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
 
     fontFamilies.forEach((family) => {
       const option = document.createElement('button');
@@ -78,6 +184,117 @@ const themeToggle = document.getElementById('theme-toggle');
       savedRange = range.cloneRange();
     }
 
+    function createRangeMarkers(range) {
+      const startMarker = document.createElement('i');
+      const endMarker = document.createElement('i');
+      startMarker.dataset.selectionMarker = 'start';
+      endMarker.dataset.selectionMarker = 'end';
+
+      const endBoundary = range.cloneRange();
+      endBoundary.collapse(false);
+      endBoundary.insertNode(endMarker);
+
+      const startBoundary = range.cloneRange();
+      startBoundary.collapse(true);
+      startBoundary.insertNode(startMarker);
+
+      return { startMarker, endMarker };
+    }
+
+    function textNodesBetweenMarkers(startMarker, endMarker) {
+      const textNodes = [];
+      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const afterStart = Boolean(startMarker.compareDocumentPosition(node)
+          & Node.DOCUMENT_POSITION_FOLLOWING);
+        const beforeEnd = Boolean(node.compareDocumentPosition(endMarker)
+          & Node.DOCUMENT_POSITION_FOLLOWING);
+        if (afterStart && beforeEnd && node.textContent) textNodes.push(node);
+      }
+      return textNodes;
+    }
+
+    function restoreMarkedRange(startMarker, endMarker) {
+      const normalizedRange = document.createRange();
+      normalizedRange.setStartAfter(startMarker);
+      normalizedRange.setEndBefore(endMarker);
+      startMarker.remove();
+      endMarker.remove();
+      restoreRange(normalizedRange);
+    }
+
+    function captureFormattingSnapshot() {
+      const range = getSelectedRange();
+      const textLength = (node) => node.nodeType === Node.TEXT_NODE
+        ? node.textContent.length
+        : [...node.childNodes].reduce((total, child) => total + textLength(child), 0);
+      const boundaryOffset = (container, offset, root = content) => {
+        if (root === container) {
+          if (container.nodeType === Node.TEXT_NODE) return offset;
+          return [...container.childNodes]
+            .slice(0, offset)
+            .reduce((total, child) => total + textLength(child), 0);
+        }
+        let total = 0;
+        for (const child of root.childNodes) {
+          if (child === container || child.contains(container)) {
+            return total + boundaryOffset(container, offset, child);
+          }
+          total += textLength(child);
+        }
+        return total;
+      };
+      return {
+        html: content.innerHTML,
+        start: range ? boundaryOffset(range.startContainer, range.startOffset) : null,
+        end: range ? boundaryOffset(range.endContainer, range.endOffset) : null
+      };
+    }
+
+    function recordFormattingChange() {
+      if (restoringFormattingHistory) return;
+      formattingUndoStack.push(captureFormattingSnapshot());
+      formattingRedoStack.length = 0;
+    }
+
+    function restoreFormattingSnapshot(snapshot) {
+      restoringFormattingHistory = true;
+      content.innerHTML = snapshot.html;
+      content.focus();
+      const range = document.createRange();
+      const locateBoundary = (offset) => {
+        const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+        let remaining = offset;
+        let node;
+        while ((node = walker.nextNode())) {
+          if (remaining <= node.textContent.length) return [node, remaining];
+          remaining -= node.textContent.length;
+        }
+        return [content, content.childNodes.length];
+      };
+      const start = locateBoundary(snapshot.start ?? 0);
+      const end = locateBoundary(snapshot.end ?? snapshot.start ?? 0);
+      range.setStart(...start);
+      range.setEnd(...end);
+      restoreRange(range);
+      restoringFormattingHistory = false;
+    }
+
+    function undoFormattingChange() {
+      if (!formattingUndoStack.length) return false;
+      formattingRedoStack.push(captureFormattingSnapshot());
+      restoreFormattingSnapshot(formattingUndoStack.pop());
+      return true;
+    }
+
+    function redoFormattingChange() {
+      if (!formattingRedoStack.length) return false;
+      formattingUndoStack.push(captureFormattingSnapshot());
+      restoreFormattingSnapshot(formattingRedoStack.pop());
+      return true;
+    }
+
     document.addEventListener('selectionchange', () => {
       const range = currentSelection();
       if (range) {
@@ -102,6 +319,27 @@ const themeToggle = document.getElementById('theme-toggle');
       fragment.querySelectorAll('[style]').forEach((element) => {
         element.style.removeProperty(property);
         if (!element.style.length) element.removeAttribute('style');
+      });
+    }
+
+    function styleTextNodes(fragment, property, value) {
+      const textNodes = [];
+      const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.textContent) textNodes.push(node);
+      }
+
+      textNodes.reverse().forEach((textNode) => {
+        const parent = textNode.parentElement;
+        if (parent && parent.tagName === 'SPAN' && parent.childNodes.length === 1) {
+          parent.style.setProperty(property, value);
+          return;
+        }
+        const span = document.createElement('span');
+        span.style.setProperty(property, value);
+        textNode.replaceWith(span);
+        span.appendChild(textNode);
       });
     }
 
@@ -153,27 +391,10 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function normalizeSpansPreservingRange(range) {
-      const startMarker = document.createElement('i');
-      const endMarker = document.createElement('i');
-      startMarker.dataset.selectionMarker = 'start';
-      endMarker.dataset.selectionMarker = 'end';
-
-      const endBoundary = range.cloneRange();
-      endBoundary.collapse(false);
-      endBoundary.insertNode(endMarker);
-
-      const startBoundary = range.cloneRange();
-      startBoundary.collapse(true);
-      startBoundary.insertNode(startMarker);
+      const { startMarker, endMarker } = createRangeMarkers(range);
 
       normalizeSpans();
-
-      const normalizedRange = document.createRange();
-      normalizedRange.setStartAfter(startMarker);
-      normalizedRange.setEndBefore(endMarker);
-      startMarker.remove();
-      endMarker.remove();
-      restoreRange(normalizedRange);
+      restoreMarkedRange(startMarker, endMarker);
     }
 
     function wrapSelection(property, value) {
@@ -191,6 +412,16 @@ const themeToggle = document.getElementById('theme-toggle');
       }
       const fragment = range.extractContents();
       removeInlineProperty(fragment, property);
+      if (fragment.querySelector('div, p, h1, h2, h3, h4, h5, h6, li, blockquote')) {
+        styleTextNodes(fragment, property, value);
+        const firstInsertedNode = fragment.firstChild;
+        const lastInsertedNode = fragment.lastChild;
+        range.insertNode(fragment);
+        range.setStartBefore(firstInsertedNode);
+        range.setEndAfter(lastInsertedNode);
+        normalizeSpansPreservingRange(range);
+        return true;
+      }
       const span = document.createElement('span');
       span.style.setProperty(property, value);
       span.appendChild(fragment);
@@ -320,6 +551,7 @@ const themeToggle = document.getElementById('theme-toggle');
               ? decorations.filter((item) => item !== value).join(' ') || 'none'
               : [...decorations, value].join(' ');
           })();
+      recordFormattingChange();
       wrapSelection(property, nextValue);
       updateSelectionPanel(getSelectedRange());
       setTimeout(() => {
@@ -328,6 +560,7 @@ const themeToggle = document.getElementById('theme-toggle');
     });
 
     function applyFontSize(size) {
+      recordFormattingChange();
       const value = `${clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE)}px`;
       if (!wrapSelection('font-size', value)) content.style.fontSize = value;
     }
@@ -336,31 +569,8 @@ const themeToggle = document.getElementById('theme-toggle');
       const range = getSelectedRange();
       if (!range) return false;
 
-      const startMarker = document.createElement('i');
-      const endMarker = document.createElement('i');
-      startMarker.dataset.selectionMarker = 'start';
-      endMarker.dataset.selectionMarker = 'end';
-
-      const endBoundary = range.cloneRange();
-      endBoundary.collapse(false);
-      endBoundary.insertNode(endMarker);
-
-      const startBoundary = range.cloneRange();
-      startBoundary.collapse(true);
-      startBoundary.insertNode(startMarker);
-
-      const textNodes = [];
-      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        const afterStart = Boolean(startMarker.compareDocumentPosition(node)
-          & Node.DOCUMENT_POSITION_FOLLOWING);
-        const beforeEnd = Boolean(node.compareDocumentPosition(endMarker)
-          & Node.DOCUMENT_POSITION_FOLLOWING);
-        if (afterStart && beforeEnd && node.textContent) {
-          textNodes.push(node);
-        }
-      }
+      const { startMarker, endMarker } = createRangeMarkers(range);
+      const textNodes = textNodesBetweenMarkers(startMarker, endMarker);
 
       textNodes.reverse().forEach((textNode) => {
         const parent = textNode.parentElement;
@@ -377,12 +587,7 @@ const themeToggle = document.getElementById('theme-toggle');
       });
 
       normalizeSpans();
-      const normalizedRange = document.createRange();
-      normalizedRange.setStartAfter(startMarker);
-      normalizedRange.setEndBefore(endMarker);
-      startMarker.remove();
-      endMarker.remove();
-      restoreRange(normalizedRange);
+      restoreMarkedRange(startMarker, endMarker);
       return true;
     }
 
@@ -406,6 +611,7 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function changeFontSize(delta) {
+      recordFormattingChange();
       if (getSelectedRange()) {
         if (applyFontSizeDeltaToSelection(delta)) {
           fontSize = clamp(fontSize + delta, MIN_FONT_SIZE, MAX_FONT_SIZE);
@@ -439,29 +645,8 @@ const themeToggle = document.getElementById('theme-toggle');
       const range = getSelectedRange();
       if (!range) return false;
 
-      const startMarker = document.createElement('i');
-      const endMarker = document.createElement('i');
-      startMarker.dataset.selectionMarker = 'start';
-      endMarker.dataset.selectionMarker = 'end';
-
-      const endBoundary = range.cloneRange();
-      endBoundary.collapse(false);
-      endBoundary.insertNode(endMarker);
-
-      const startBoundary = range.cloneRange();
-      startBoundary.collapse(true);
-      startBoundary.insertNode(startMarker);
-
-      const textNodes = [];
-      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        const afterStart = Boolean(startMarker.compareDocumentPosition(node)
-          & Node.DOCUMENT_POSITION_FOLLOWING);
-        const beforeEnd = Boolean(node.compareDocumentPosition(endMarker)
-          & Node.DOCUMENT_POSITION_FOLLOWING);
-        if (afterStart && beforeEnd && node.textContent) textNodes.push(node);
-      }
+      const { startMarker, endMarker } = createRangeMarkers(range);
+      const textNodes = textNodesBetweenMarkers(startMarker, endMarker);
 
       textNodes.reverse().forEach((textNode) => {
         const parent = textNode.parentElement;
@@ -479,12 +664,7 @@ const themeToggle = document.getElementById('theme-toggle');
       });
 
       normalizeSpans();
-      const normalizedRange = document.createRange();
-      normalizedRange.setStartAfter(startMarker);
-      normalizedRange.setEndBefore(endMarker);
-      startMarker.remove();
-      endMarker.remove();
-      restoreRange(normalizedRange);
+      restoreMarkedRange(startMarker, endMarker);
       return true;
     }
 
@@ -499,6 +679,7 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function applyTextColor() {
+      recordFormattingChange();
       const color = getRgbaColor();
       if (!wrapSelection('color', color)) {
         content.style.color = color;
@@ -514,6 +695,7 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function applyGlobalTextOpacity() {
+      recordFormattingChange();
       const contentColor = colorChannels(getComputedStyle(content).color);
       if (contentColor) content.style.color = rgbaFromChannels(contentColor);
 
@@ -532,6 +714,16 @@ const themeToggle = document.getElementById('theme-toggle');
     });
 
     window.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        if (event.shiftKey ? redoFormattingChange() : undoFormattingChange()) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        if (redoFormattingChange()) event.preventDefault();
+        return;
+      }
       const increase = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
       const decrease = event.key === '-' || event.key === '_' || event.code === 'Minus' || event.code === 'NumpadSubtract';
       if (!event.altKey || (!increase && !decrease) || event.target === fontSizeValue) return;
@@ -567,6 +759,7 @@ const themeToggle = document.getElementById('theme-toggle');
       if (!option) return;
       const family = option.dataset.fontFamily;
       setSelectedFontFamily(family);
+      recordFormattingChange();
       if (!wrapSelection('font-family', family)) {
         content.style.fontFamily = family;
         content.querySelectorAll('span').forEach((span) => {
@@ -580,11 +773,44 @@ const themeToggle = document.getElementById('theme-toggle');
     fontFamilyToggle.addEventListener('click', () => {
       const isOpen = fontFamilyMenu.classList.toggle('is-open');
       fontFamilyToggle.setAttribute('aria-expanded', String(isOpen));
+      if (isOpen) {
+        const selectedOption = fontFamilyMenu.querySelector('[aria-selected="true"]');
+        (selectedOption || fontFamilyMenu.querySelector('.font-family-option')).focus();
+      }
+    });
+    fontFamilyToggle.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        fontFamilyToggle.click();
+      }
+    });
+    fontFamilyMenu.addEventListener('keydown', (event) => {
+      const options = [...fontFamilyMenu.querySelectorAll('.font-family-option')];
+      const currentIndex = options.indexOf(document.activeElement);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        fontFamilyMenu.classList.remove('is-open');
+        fontFamilyToggle.setAttribute('aria-expanded', 'false');
+        fontFamilyToggle.focus();
+      } else if (event.key === 'ArrowDown' && currentIndex < options.length - 1) {
+        event.preventDefault();
+        options[currentIndex + 1].focus();
+      } else if (event.key === 'ArrowUp' && currentIndex > 0) {
+        event.preventDefault();
+        options[currentIndex - 1].focus();
+      }
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (!fontFamilyMenu.classList.contains('is-open')
+        || event.target.closest('.font-family-control')) return;
+      fontFamilyMenu.classList.remove('is-open');
+      fontFamilyToggle.setAttribute('aria-expanded', 'false');
     });
     textOpacity.addEventListener('input', () => {
       opacityValue.textContent = `${textOpacity.value}%`;
       if (getSelectedRange()) {
         const requestedOpacity = textOpacity.value;
+        recordFormattingChange();
         preservingToolbarSelection = true;
         suppressSelectionSync = true;
         applyOpacityToSelection();
@@ -596,6 +822,46 @@ const themeToggle = document.getElementById('theme-toggle');
       } else {
         applyGlobalTextOpacity();
       }
+    });
+
+    content.addEventListener('input', () => {
+      if (restoringFormattingHistory) return;
+      formattingUndoStack.length = 0;
+      formattingRedoStack.length = 0;
+      scheduleSave();
+    });
+
+    new MutationObserver(scheduleSave).observe(content, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['style']
+    });
+
+    content.addEventListener('paste', (event) => {
+      const text = event.clipboardData && event.clipboardData.getData('text/plain');
+      if (text === null || text === undefined) return;
+
+      event.preventDefault();
+      const range = getSelectedRange(false) || (() => {
+        const selection = window.getSelection();
+        return selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      })();
+      if (!range || !isRangeInEditor(range)) return;
+
+      restoreRange(range);
+      if (document.execCommand('insertText', false, text)) return;
+
+      range.deleteContents();
+      const fragment = document.createDocumentFragment();
+      text.split(/\r\n|\r|\n/).forEach((line, index, lines) => {
+        fragment.appendChild(document.createTextNode(line));
+        if (index < lines.length - 1) fragment.appendChild(document.createElement('br'));
+      });
+      range.insertNode(fragment);
+      range.collapse(false);
+      restoreRange(range);
     });
 
     document.querySelector('.header-controls').addEventListener('pointerdown', (event) => {
@@ -627,8 +893,17 @@ const themeToggle = document.getElementById('theme-toggle');
       themeToggle.setAttribute('aria-label', isDark ? 'Switch to light theme' : 'Switch to dark theme');
       themeToggle.title = isDark ? 'Switch to light theme' : 'Switch to dark theme';
       themeToggle.setAttribute('aria-pressed', String(isDark));
+      scheduleSave();
     });
 
+    restoreDefaults.addEventListener('click', restoreDefaultDocument);
+    saveFile.addEventListener('click', downloadDocument);
+
+    restoreDocument();
     updateFontControls();
     setSelectedFontFamily(selectedFontFamily);
+    applyBackgroundColor();
+    themeToggle.setAttribute('aria-label', document.body.classList.contains('dark')
+      ? 'Switch to light theme' : 'Switch to dark theme');
+    themeToggle.setAttribute('aria-pressed', String(document.body.classList.contains('dark')));
     content.focus();
