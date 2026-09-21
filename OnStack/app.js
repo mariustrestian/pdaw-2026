@@ -18,13 +18,17 @@ const themeToggle = document.getElementById('theme-toggle');
     let fontSize = DEFAULT_FONT_SIZE;
     let savedRange = null;
     let hasCustomTextColor = false;
+    let hasCustomBackgroundColor = false;
     let preservingToolbarSelection = false;
     let suppressSelectionSync = false;
     const formattingUndoStack = [];
     const formattingRedoStack = [];
     let restoringFormattingHistory = false;
     const STORAGE_KEY = 'onstack-document';
+    const MAX_HISTORY_ENTRIES = 100;
     let persistenceTimer = null;
+    let typingHistoryRecorded = false;
+    let typingHistoryTimer = null;
     const formattingProperties = [
       'font-size', 'font-family', 'color', 'background-color',
       'font-weight', 'font-style', 'text-decoration-line'
@@ -50,6 +54,7 @@ const themeToggle = document.getElementById('theme-toggle');
           backgroundColor: backgroundColor.value,
           darkTheme: document.body.classList.contains('dark'),
           hasCustomTextColor,
+          hasCustomBackgroundColor,
           selectedFontFamily
         }));
       } catch (error) {
@@ -75,6 +80,19 @@ const themeToggle = document.getElementById('theme-toggle');
         if (typeof saved.textOpacity === 'string') textOpacity.value = saved.textOpacity;
         if (typeof saved.backgroundColor === 'string') backgroundColor.value = saved.backgroundColor;
         hasCustomTextColor = saved.hasCustomTextColor === true;
+        if (typeof saved.hasCustomBackgroundColor === 'boolean') {
+          hasCustomBackgroundColor = saved.hasCustomBackgroundColor;
+        } else {
+          const savedStyle = saved.contentStyle || '';
+          const savedBackground = String(saved.backgroundColor || '').toLowerCase();
+          const styleBackground = savedStyle.match(/background-color\s*:\s*([^;]+)/i);
+          const styleBackgroundValue = styleBackground ? styleBackground[1].trim().toLowerCase() : '';
+          hasCustomBackgroundColor = Boolean(
+            (styleBackgroundValue && !['#ffffff', '#1f1f1f', 'rgb(255, 255, 255)', 'rgb(31, 31, 31)']
+              .includes(styleBackgroundValue))
+            || (savedBackground && !['#ffffff', '#1f1f1f'].includes(savedBackground))
+          );
+        }
         if (saved.darkTheme) {
           document.body.classList.add('dark');
           document.documentElement.classList.add('dark');
@@ -99,6 +117,7 @@ const themeToggle = document.getElementById('theme-toggle');
       backgroundColor.value = '#ffffff';
       fontSize = DEFAULT_FONT_SIZE;
       hasCustomTextColor = false;
+      hasCustomBackgroundColor = false;
       selectedFontFamily = fontFamilies[0];
       document.body.classList.remove('dark');
       document.documentElement.classList.remove('dark');
@@ -115,11 +134,33 @@ const themeToggle = document.getElementById('theme-toggle');
       content.focus();
     }
 
+    function updateThemeToggle(isDark) {
+      themeToggle.innerHTML = isDark
+        ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M23 5a12 12 0 1 0 0 22A9 9 0 1 1 23 5Z"></path></svg>'
+        : '<svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6"></circle><path class="sun-rays" d="M16 2v5M16 25v5M2 16h5M25 16h5M6.1 6.1l3.5 3.5M22.4 22.4l3.5 3.5M25.9 6.1l-3.5 3.5M9.6 22.4l-3.5 3.5"></path></svg>';
+      themeToggle.setAttribute('aria-label', isDark ? 'Switch to light theme' : 'Switch to dark theme');
+      themeToggle.title = isDark ? 'Switch to light theme' : 'Switch to dark theme';
+      themeToggle.setAttribute('aria-pressed', String(isDark));
+    }
+
+    function applyThemeBackground(isDark) {
+      const color = isDark ? '#1f1f1f' : '#ffffff';
+      backgroundColor.value = color;
+      content.style.backgroundColor = color;
+    }
+
     function downloadDocument() {
-      const contentStyle = content.getAttribute('style');
-      const styleAttribute = contentStyle
-        ? ` style="${contentStyle.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`
-        : '';
+      const computed = getComputedStyle(content);
+      const exportedStyles = [
+        `box-sizing: border-box`,
+        `font-family: ${computed.fontFamily}`,
+        `font-size: ${computed.fontSize}`,
+        `line-height: ${computed.lineHeight}`,
+        `color: ${computed.color}`,
+        `background-color: ${computed.backgroundColor}`,
+        `padding: ${computed.padding}`
+      ].join('; ');
+      const styleAttribute = ` style="${exportedStyles.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`;
       const exportedDocument = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -153,6 +194,13 @@ const themeToggle = document.getElementById('theme-toggle');
 
     function clamp(value, min, max) {
       return Math.min(max, Math.max(min, value));
+    }
+
+    function getEventTargetElement(target) {
+      if (!target) return null;
+      if (target instanceof Element) return target;
+      if (target instanceof Node && target.parentElement) return target.parentElement;
+      return null;
     }
 
     function isRangeInEditor(range) {
@@ -255,7 +303,10 @@ const themeToggle = document.getElementById('theme-toggle');
     function recordFormattingChange() {
       if (restoringFormattingHistory) return;
       formattingUndoStack.push(captureFormattingSnapshot());
+      if (formattingUndoStack.length > MAX_HISTORY_ENTRIES) formattingUndoStack.shift();
       formattingRedoStack.length = 0;
+      typingHistoryRecorded = false;
+      clearTimeout(typingHistoryTimer);
     }
 
     function restoreFormattingSnapshot(snapshot) {
@@ -490,7 +541,10 @@ const themeToggle = document.getElementById('theme-toggle');
         ? rect.top - panelRect.height - 8
         : rect.bottom + 8;
       selectionPanel.style.left = `${left}px`;
-      selectionPanel.style.top = `${Math.max(8, top)}px`;
+      selectionPanel.style.top = `${Math.max(
+        8,
+        Math.min(window.innerHeight - panelRect.height - 8, top)
+      )}px`;
 
       const container = range.startContainer.nodeType === Node.ELEMENT_NODE
         ? range.startContainer
@@ -521,13 +575,20 @@ const themeToggle = document.getElementById('theme-toggle');
       });
     }
 
-    selectionPanel.addEventListener('pointerdown', () => {
-      preservingToolbarSelection = true;
+    selectionPanel.addEventListener('pointerdown', (event) => {
+      const target = getEventTargetElement(event.target);
+      if (target && target.closest('button[data-style-property]')) {
+        preservingToolbarSelection = true;
+      }
     });
 
     selectionPanel.addEventListener('click', (event) => {
-      const button = event.target.closest('button[data-style-property]');
-      if (!button) return;
+      const target = getEventTargetElement(event.target);
+      const button = target && target.closest('button[data-style-property]');
+      if (!button) {
+        preservingToolbarSelection = false;
+        return;
+      }
       const property = button.dataset.styleProperty;
       const value = button.dataset.styleValue;
       const currentRange = getSelectedRange();
@@ -611,10 +672,25 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function changeFontSize(delta) {
+      const currentSize = parseFloat(getComputedStyle(content).fontSize);
+      const selectedRange = getSelectedRange();
+      if ((!selectedRange && ((delta < 0 && currentSize <= MIN_FONT_SIZE)
+        || (delta > 0 && currentSize >= MAX_FONT_SIZE)))
+      ) return;
+      const beforeHTML = content.innerHTML;
       recordFormattingChange();
-      if (getSelectedRange()) {
+      if (selectedRange) {
         if (applyFontSizeDeltaToSelection(delta)) {
-          fontSize = clamp(fontSize + delta, MIN_FONT_SIZE, MAX_FONT_SIZE);
+          if (content.innerHTML === beforeHTML) {
+            formattingUndoStack.pop();
+            return;
+          }
+          const sizes = [...content.querySelectorAll('span[style*="font-size"]')]
+            .map((span) => parseFloat(span.style.fontSize))
+            .filter(Number.isFinite);
+          fontSize = sizes.length
+            ? Math.round(delta < 0 ? Math.min(...sizes) : Math.max(...sizes))
+            : clamp(fontSize + delta, MIN_FONT_SIZE, MAX_FONT_SIZE);
           updateFontControls();
         }
         return;
@@ -695,7 +771,6 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function applyGlobalTextOpacity() {
-      recordFormattingChange();
       const contentColor = colorChannels(getComputedStyle(content).color);
       if (contentColor) content.style.color = rgbaFromChannels(contentColor);
 
@@ -714,19 +789,32 @@ const themeToggle = document.getElementById('theme-toggle');
     });
 
     window.addEventListener('keydown', (event) => {
+      const target = getEventTargetElement(event.target);
+      const toolbarContainer = document.querySelector('.header-controls');
+      const editorHasFocus = target === content || (target && content.contains(target));
+      const toolbarHasSelection = Boolean(
+        toolbarContainer
+        && target
+        && toolbarContainer.contains(target)
+        && isRangeInEditor(savedRange)
+      );
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-        if (event.shiftKey ? redoFormattingChange() : undoFormattingChange()) {
+        if ((editorHasFocus || toolbarHasSelection)
+          && (event.shiftKey ? redoFormattingChange() : undoFormattingChange())) {
           event.preventDefault();
         }
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-        if (redoFormattingChange()) event.preventDefault();
+        if ((editorHasFocus || toolbarHasSelection) && redoFormattingChange()) event.preventDefault();
         return;
       }
       const increase = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
       const decrease = event.key === '-' || event.key === '_' || event.code === 'Minus' || event.code === 'NumpadSubtract';
-      if (!event.altKey || (!increase && !decrease) || event.target === fontSizeValue) return;
+      const isInputLikeTarget = Boolean(target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+      if (!event.altKey || (!increase && !decrease)
+        || target === fontSizeValue
+        || isInputLikeTarget) return;
       event.preventDefault();
       event.stopPropagation();
       changeFontSize((increase ? 1 : -1) * (event.shiftKey ? 5 : 1));
@@ -753,9 +841,14 @@ const themeToggle = document.getElementById('theme-toggle');
         suppressSelectionSync = false;
       }, 0);
     });
-    backgroundColor.addEventListener('input', applyBackgroundColor);
+    backgroundColor.addEventListener('input', () => {
+      hasCustomBackgroundColor = true;
+      applyBackgroundColor();
+      scheduleSave();
+    });
     fontFamilyMenu.addEventListener('click', (event) => {
-      const option = event.target.closest('.font-family-option');
+      const target = getEventTargetElement(event.target);
+      const option = target && target.closest('.font-family-option');
       if (!option) return;
       const family = option.dataset.fontFamily;
       setSelectedFontFamily(family);
@@ -769,6 +862,7 @@ const themeToggle = document.getElementById('theme-toggle');
       }
       fontFamilyMenu.classList.remove('is-open');
       fontFamilyToggle.setAttribute('aria-expanded', 'false');
+      fontFamilyToggle.focus();
     });
     fontFamilyToggle.addEventListener('click', () => {
       const isOpen = fontFamilyMenu.classList.toggle('is-open');
@@ -801,16 +895,34 @@ const themeToggle = document.getElementById('theme-toggle');
       }
     });
     document.addEventListener('pointerdown', (event) => {
+      const target = getEventTargetElement(event.target);
       if (!fontFamilyMenu.classList.contains('is-open')
-        || event.target.closest('.font-family-control')) return;
+        || (target && target.closest('.font-family-control'))) return;
       fontFamilyMenu.classList.remove('is-open');
       fontFamilyToggle.setAttribute('aria-expanded', 'false');
     });
+    let opacityChangeRecorded = false;
+    textOpacity.addEventListener('pointerdown', () => {
+      opacityChangeRecorded = false;
+    });
+    textOpacity.addEventListener('pointerup', () => {
+      opacityChangeRecorded = false;
+    });
+    textOpacity.addEventListener('focus', () => {
+      opacityChangeRecorded = false;
+    });
+    textOpacity.addEventListener('blur', () => {
+      opacityChangeRecorded = false;
+    });
     textOpacity.addEventListener('input', () => {
+      hasCustomTextColor = true;
       opacityValue.textContent = `${textOpacity.value}%`;
+      if (!opacityChangeRecorded) {
+        recordFormattingChange();
+        opacityChangeRecorded = true;
+      }
       if (getSelectedRange()) {
         const requestedOpacity = textOpacity.value;
-        recordFormattingChange();
         preservingToolbarSelection = true;
         suppressSelectionSync = true;
         applyOpacityToSelection();
@@ -824,10 +936,22 @@ const themeToggle = document.getElementById('theme-toggle');
       }
     });
 
+    content.addEventListener('beforeinput', (event) => {
+      if (restoringFormattingHistory) return;
+      if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') {
+        if (!typingHistoryRecorded) {
+          recordFormattingChange();
+          typingHistoryRecorded = true;
+        }
+        clearTimeout(typingHistoryTimer);
+        typingHistoryTimer = setTimeout(() => {
+          typingHistoryRecorded = false;
+        }, 1000);
+      }
+    });
+
     content.addEventListener('input', () => {
       if (restoringFormattingHistory) return;
-      formattingUndoStack.length = 0;
-      formattingRedoStack.length = 0;
       scheduleSave();
     });
 
@@ -865,7 +989,8 @@ const themeToggle = document.getElementById('theme-toggle');
     });
 
     document.querySelector('.header-controls').addEventListener('pointerdown', (event) => {
-      if (event.target.closest('#font-family-toggle, .font-family-option, #selection-panel')) return;
+      const target = getEventTargetElement(event.target);
+      if (target && target.closest('#font-family-toggle, .font-family-option')) return;
       if (!savedRange) return;
       preservingToolbarSelection = true;
       setTimeout(() => {
@@ -881,18 +1006,23 @@ const themeToggle = document.getElementById('theme-toggle');
       updateSelectionPanel(range);
     });
 
+    content.addEventListener('scroll', () => {
+      const range = currentSelection();
+      if (range) updateSelectionPanel(range);
+    });
+    window.addEventListener('resize', () => {
+      const range = currentSelection();
+      if (range) updateSelectionPanel(range);
+    });
+
     themeToggle.addEventListener('click', () => {
       const isDark = document.body.classList.toggle('dark');
       document.documentElement.classList.toggle('dark', isDark);
       if (!hasCustomTextColor) {
         applyThemeTextColor(isDark ? '#ffffff' : '#000000');
       }
-      themeToggle.innerHTML = isDark
-        ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M23 5a12 12 0 1 0 0 22A9 9 0 1 1 23 5Z"></path></svg>'
-        : '<svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="6"></circle><path class="sun-rays" d="M16 2v5M16 25v5M2 16h5M25 16h5M6.1 6.1l3.5 3.5M22.4 22.4l3.5 3.5M25.9 6.1l-3.5 3.5M9.6 22.4l-3.5 3.5"></path></svg>';
-      themeToggle.setAttribute('aria-label', isDark ? 'Switch to light theme' : 'Switch to dark theme');
-      themeToggle.title = isDark ? 'Switch to light theme' : 'Switch to dark theme';
-      themeToggle.setAttribute('aria-pressed', String(isDark));
+      if (!hasCustomBackgroundColor) applyThemeBackground(isDark);
+      updateThemeToggle(isDark);
       scheduleSave();
     });
 
@@ -900,10 +1030,14 @@ const themeToggle = document.getElementById('theme-toggle');
     saveFile.addEventListener('click', downloadDocument);
 
     restoreDocument();
+    if (!hasCustomBackgroundColor) applyThemeBackground(document.body.classList.contains('dark'));
+    fontSize = clamp(Math.round(parseFloat(getComputedStyle(content).fontSize)), MIN_FONT_SIZE, MAX_FONT_SIZE);
     updateFontControls();
     setSelectedFontFamily(selectedFontFamily);
     applyBackgroundColor();
-    themeToggle.setAttribute('aria-label', document.body.classList.contains('dark')
-      ? 'Switch to light theme' : 'Switch to dark theme');
-    themeToggle.setAttribute('aria-pressed', String(document.body.classList.contains('dark')));
+    if (document.body.classList.contains('dark')) {
+      updateThemeToggle(true);
+    } else {
+      updateThemeToggle(false);
+    }
     content.focus();
