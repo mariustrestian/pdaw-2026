@@ -9,7 +9,7 @@
 <body>
   <header>
     <div class="brand-actions">
-      <a class="logo" href="#">OnStack</a>
+      <span class="logo">OnStack</span>
       <button id="restore-defaults" class="header-action" type="button" title="Restore default editor settings">Restore Defaults</button>
       <button id="save-file" class="header-action" type="button" title="Download this document as an HTML file">Save File</button>
     </div>
@@ -42,7 +42,7 @@
   </header>
 
   <main>
-    <div id="content" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Text"></div>
+    <div id="content" class="is-empty" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Text"></div>
   </main>
 
   <div id="selection-panel" class="selection-panel" role="toolbar" aria-label="Text formatting" aria-hidden="true">

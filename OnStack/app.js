@@ -15,12 +15,17 @@ const themeToggle = document.getElementById('theme-toggle');
     const MIN_FONT_SIZE = 2;
     const MAX_FONT_SIZE = 160;
     const DEFAULT_FONT_SIZE = 24;
+    const LIGHT_TEXT_COLOR = '#000000';
+    const DARK_TEXT_COLOR = '#ffffff';
+    const LIGHT_BACKGROUND_COLOR = '#ffffff';
+    const DARK_BACKGROUND_COLOR = '#1f1f1f';
     let fontSize = DEFAULT_FONT_SIZE;
     let savedRange = null;
     let hasCustomTextColor = false;
     let hasCustomBackgroundColor = false;
     let preservingToolbarSelection = false;
     let suppressSelectionSync = false;
+    let suppressPersistence = false;
     const formattingUndoStack = [];
     const formattingRedoStack = [];
     let restoringFormattingHistory = false;
@@ -44,10 +49,61 @@ const themeToggle = document.getElementById('theme-toggle');
     ];
     let selectedFontFamily = fontFamilies[0];
 
+    function isDarkTheme() {
+      return document.body.classList.contains('dark');
+    }
+
+    function themeTextColor() {
+      return isDarkTheme() ? DARK_TEXT_COLOR : LIGHT_TEXT_COLOR;
+    }
+
+    function themeBackgroundColor() {
+      return isDarkTheme() ? DARK_BACKGROUND_COLOR : LIGHT_BACKGROUND_COLOR;
+    }
+
+    function normalizeHexColor(value) {
+      return String(value || '').trim().toLowerCase();
+    }
+
+    function sanitizeEditorHtml(html) {
+      const template = document.createElement('template');
+      template.innerHTML = html;
+      const forbidden = new Set(['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'STYLE', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT']);
+      template.content.querySelectorAll('*').forEach((element) => {
+        if (forbidden.has(element.tagName)) {
+          element.remove();
+          return;
+        }
+        [...element.attributes].forEach((attribute) => {
+          const name = attribute.name.toLowerCase();
+          const value = attribute.value;
+          if (name.startsWith('on') || /javascript:/i.test(value) || (name === 'src' && /^\s*javascript:/i.test(value))) {
+            element.removeAttribute(attribute.name);
+          }
+        });
+      });
+      return template.innerHTML;
+    }
+
+    function editorSpansWithProperty(property) {
+      return [...content.querySelectorAll('span')].filter((span) => span.style.getPropertyValue(property));
+    }
+
+    function updateEditorEmptyState() {
+      const empty = !content.textContent.replace(/\u00a0/g, ' ').trim();
+      content.classList.toggle('is-empty', empty);
+    }
+
+    function updateCustomColorFlags() {
+      hasCustomTextColor = normalizeHexColor(textColor.value) !== themeTextColor()
+        || String(textOpacity.value) !== '100';
+      hasCustomBackgroundColor = normalizeHexColor(backgroundColor.value) !== themeBackgroundColor();
+    }
+
     function saveDocument() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          html: content.innerHTML,
+          html: sanitizeEditorHtml(content.innerHTML),
           contentStyle: content.getAttribute('style') || '',
           textColor: textColor.value,
           textOpacity: textOpacity.value,
@@ -63,6 +119,7 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function scheduleSave() {
+      if (suppressPersistence) return;
       clearTimeout(persistenceTimer);
       persistenceTimer = setTimeout(saveDocument, 150);
     }
@@ -71,7 +128,7 @@ const themeToggle = document.getElementById('theme-toggle');
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
         if (!saved) return;
-        if (typeof saved.html === 'string') content.innerHTML = saved.html;
+        if (typeof saved.html === 'string') content.innerHTML = sanitizeEditorHtml(saved.html);
         if (typeof saved.contentStyle === 'string') {
           if (saved.contentStyle) content.setAttribute('style', saved.contentStyle);
           else content.removeAttribute('style');
@@ -107,7 +164,9 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function restoreDefaultDocument() {
+      suppressPersistence = true;
       clearTimeout(persistenceTimer);
+      persistenceTimer = null;
       localStorage.removeItem(STORAGE_KEY);
       content.innerHTML = '';
       content.removeAttribute('style');
@@ -131,7 +190,9 @@ const themeToggle = document.getElementById('theme-toggle');
       hideSelectionPanel();
       updateFontControls();
       setSelectedFontFamily(selectedFontFamily);
+      updateEditorEmptyState();
       content.focus();
+      suppressPersistence = false;
     }
 
     function updateThemeToggle(isDark) {
@@ -144,7 +205,7 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function applyThemeBackground(isDark) {
-      const color = isDark ? '#1f1f1f' : '#ffffff';
+      const color = isDark ? DARK_BACKGROUND_COLOR : LIGHT_BACKGROUND_COLOR;
       backgroundColor.value = color;
       content.style.backgroundColor = color;
     }
@@ -169,7 +230,7 @@ const themeToggle = document.getElementById('theme-toggle');
   <title>OnStack Document</title>
 </head>
 <body>
-<main${styleAttribute}>${content.innerHTML}</main>
+<main${styleAttribute}>${sanitizeEditorHtml(content.innerHTML)}</main>
 </body>
 </html>`;
       const blob = new Blob([exportedDocument], { type: 'text/html;charset=utf-8' });
@@ -225,11 +286,15 @@ const themeToggle = document.getElementById('theme-toggle');
     }
 
     function restoreRange(range) {
-      if (!range) return;
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      savedRange = range.cloneRange();
+      if (!range || !isRangeInEditor(range)) return;
+      try {
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        savedRange = range.cloneRange();
+      } catch (error) {
+        savedRange = null;
+      }
     }
 
     function createRangeMarkers(range) {
@@ -272,11 +337,15 @@ const themeToggle = document.getElementById('theme-toggle');
       restoreRange(normalizedRange);
     }
 
+    function snapshotNodeLength(node) {
+      if (node.nodeType === Node.TEXT_NODE) return node.textContent.length;
+      if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') return 1;
+      return [...node.childNodes].reduce((total, child) => total + snapshotNodeLength(child), 0);
+    }
+
     function captureFormattingSnapshot() {
       const range = getSelectedRange();
-      const textLength = (node) => node.nodeType === Node.TEXT_NODE
-        ? node.textContent.length
-        : [...node.childNodes].reduce((total, child) => total + textLength(child), 0);
+      const textLength = snapshotNodeLength;
       const boundaryOffset = (container, offset, root = content) => {
         if (root === container) {
           if (container.nodeType === Node.TEXT_NODE) return offset;
@@ -315,10 +384,28 @@ const themeToggle = document.getElementById('theme-toggle');
       content.focus();
       const range = document.createRange();
       const locateBoundary = (offset) => {
-        const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+        const walker = document.createTreeWalker(
+          content,
+          NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+          {
+            acceptNode(node) {
+              if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+              if (node.tagName === 'BR') return NodeFilter.FILTER_ACCEPT;
+              return NodeFilter.FILTER_SKIP;
+            }
+          }
+        );
         let remaining = offset;
         let node;
         while ((node = walker.nextNode())) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const parent = node.parentNode;
+            const index = [...parent.childNodes].indexOf(node);
+            if (remaining === 0) return [parent, index];
+            if (remaining <= 1) return [parent, index + 1];
+            remaining -= 1;
+            continue;
+          }
           if (remaining <= node.textContent.length) return [node, remaining];
           remaining -= node.textContent.length;
         }
@@ -330,6 +417,8 @@ const themeToggle = document.getElementById('theme-toggle');
       range.setEnd(...end);
       restoreRange(range);
       restoringFormattingHistory = false;
+      syncToolbarFromCurrentState();
+      updateEditorEmptyState();
     }
 
     function undoFormattingChange() {
@@ -468,9 +557,11 @@ const themeToggle = document.getElementById('theme-toggle');
         const firstInsertedNode = fragment.firstChild;
         const lastInsertedNode = fragment.lastChild;
         range.insertNode(fragment);
-        range.setStartBefore(firstInsertedNode);
-        range.setEndAfter(lastInsertedNode);
-        normalizeSpansPreservingRange(range);
+        if (firstInsertedNode && lastInsertedNode) {
+          range.setStartBefore(firstInsertedNode);
+          range.setEndAfter(lastInsertedNode);
+          normalizeSpansPreservingRange(range);
+        }
         return true;
       }
       const span = document.createElement('span');
@@ -480,6 +571,52 @@ const themeToggle = document.getElementById('theme-toggle');
       range.selectNodeContents(span);
       normalizeSpansPreservingRange(range);
       return true;
+    }
+
+    function textNodesInRange(range) {
+      const textNodes = [];
+      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.textContent) continue;
+        if (range.intersectsNode(node)) textNodes.push(node);
+      }
+      return textNodes;
+    }
+
+    function propertyIsActive(computed, property, value) {
+      const current = computed.getPropertyValue(property);
+      if (property === 'text-decoration-line') return current.split(' ').includes(value);
+      if (property === 'font-weight') return current === value || Number(current) >= 600;
+      return current === value;
+    }
+
+    function updateControlsFromComputed(computed) {
+      const selectedSize = parseInt(computed.fontSize, 10);
+      if (selectedSize) {
+        fontSize = clamp(selectedSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
+        updateFontControls();
+      }
+      updateColorControls(computed.color);
+      const computedFamily = computed.fontFamily.replace(/["']/g, '').split(',')[0].trim();
+      if (fontFamilies.includes(computedFamily)) {
+        setSelectedFontFamily(computedFamily);
+      }
+    }
+
+    function syncToolbarFromCurrentState() {
+      const selection = window.getSelection();
+      const liveRange = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      const range = (liveRange && isRangeInEditor(liveRange) && liveRange)
+        || (isRangeInEditor(savedRange) ? savedRange : null);
+      if (range) {
+        updateControlsFromSelection(range);
+        if (!range.collapsed) updateSelectionPanel(range);
+        else hideSelectionPanel();
+        return;
+      }
+      updateControlsFromComputed(getComputedStyle(content));
+      hideSelectionPanel();
     }
 
     function updateFontControls() {
@@ -509,18 +646,7 @@ const themeToggle = document.getElementById('theme-toggle');
       }
       container = container.nodeType === Node.TEXT_NODE ? container.parentElement : container;
       const styledElement = container && container.closest('span');
-      const computed = getComputedStyle(styledElement || content);
-      const selectedSize = parseInt(computed.fontSize, 10);
-      if (selectedSize) {
-        fontSize = clamp(selectedSize, MIN_FONT_SIZE, MAX_FONT_SIZE);
-        updateFontControls();
-      }
-
-      updateColorControls(computed.color);
-      const computedFamily = computed.fontFamily.replace(/["']/g, '').split(',')[0].trim();
-      if (fontFamilies.includes(computedFamily)) {
-        setSelectedFontFamily(computedFamily);
-      }
+      updateControlsFromComputed(getComputedStyle(styledElement || content));
     }
 
     function updateSelectionPanel(range) {
@@ -550,14 +676,18 @@ const themeToggle = document.getElementById('theme-toggle');
         ? range.startContainer
         : range.startContainer.parentElement;
       const styledElement = container && container.closest('span');
-      const computed = getComputedStyle(styledElement || content);
+      const nodes = textNodesInRange(range);
       selectionPanel.querySelectorAll('button[data-style-property]').forEach((button) => {
         const property = button.dataset.styleProperty;
         const value = button.dataset.styleValue;
-        const current = computed.getPropertyValue(property);
-        button.classList.toggle('is-active', property === 'text-decoration-line'
-          ? current.split(' ').includes(value)
-          : current === value || (property === 'font-weight' && Number(current) >= 600));
+        const isActive = nodes.length
+          ? nodes.every((node) => propertyIsActive(
+            getComputedStyle(node.parentElement || content),
+            property,
+            value
+          ))
+          : propertyIsActive(getComputedStyle(styledElement || content), property, value);
+        button.classList.toggle('is-active', isActive);
       });
     }
 
@@ -573,6 +703,18 @@ const themeToggle = document.getElementById('theme-toggle');
       fontFamilyMenu.querySelectorAll('.font-family-option').forEach((option) => {
         option.setAttribute('aria-selected', String(option.dataset.fontFamily === family));
       });
+    }
+
+    function closeFontFamilyMenu() {
+      fontFamilyMenu.classList.remove('is-open');
+      fontFamilyToggle.setAttribute('aria-expanded', 'false');
+      preservingToolbarSelection = false;
+    }
+
+    function openFontFamilyMenu() {
+      fontFamilyMenu.classList.add('is-open');
+      fontFamilyToggle.setAttribute('aria-expanded', 'true');
+      if (savedRange) preservingToolbarSelection = true;
     }
 
     selectionPanel.addEventListener('pointerdown', (event) => {
@@ -592,7 +734,10 @@ const themeToggle = document.getElementById('theme-toggle');
       const property = button.dataset.styleProperty;
       const value = button.dataset.styleValue;
       const currentRange = getSelectedRange();
-      if (!currentRange) return;
+      if (!currentRange) {
+        preservingToolbarSelection = false;
+        return;
+      }
       const container = currentRange.startContainer.nodeType === Node.ELEMENT_NODE
         ? currentRange.startContainer
         : currentRange.startContainer.parentElement;
@@ -655,14 +800,13 @@ const themeToggle = document.getElementById('theme-toggle');
     function explicitFontSizes() {
       return [
         parseFloat(getComputedStyle(content).fontSize),
-        ...[...content.querySelectorAll('span[style*="font-size"]')]
-          .map((span) => parseFloat(span.style.fontSize))
+        ...editorSpansWithProperty('font-size').map((span) => parseFloat(span.style.fontSize))
       ];
     }
 
     function applyGlobalFontDelta(delta) {
       content.style.fontSize = `${clamp(parseFloat(getComputedStyle(content).fontSize) + delta, MIN_FONT_SIZE, MAX_FONT_SIZE)}px`;
-      content.querySelectorAll('span[style*="font-size"]').forEach((span) => {
+      editorSpansWithProperty('font-size').forEach((span) => {
         span.style.fontSize = `${clamp(parseFloat(span.style.fontSize) + delta, MIN_FONT_SIZE, MAX_FONT_SIZE)}px`;
       });
       normalizeSpans();
@@ -685,7 +829,7 @@ const themeToggle = document.getElementById('theme-toggle');
             formattingUndoStack.pop();
             return;
           }
-          const sizes = [...content.querySelectorAll('span[style*="font-size"]')]
+          const sizes = editorSpansWithProperty('font-size')
             .map((span) => parseFloat(span.style.fontSize))
             .filter(Number.isFinite);
           fontSize = sizes.length
@@ -748,22 +892,13 @@ const themeToggle = document.getElementById('theme-toggle');
       const [red, green, blue] = hexToRgb(hexColor);
       const color = `rgba(${red}, ${green}, ${blue}, ${Number(textOpacity.value) / 100})`;
       content.style.color = color;
-      content.querySelectorAll('span[style*="color"]').forEach((span) => {
-        span.style.color = color;
-      });
       textColor.value = hexColor;
     }
 
     function applyTextColor() {
       recordFormattingChange();
       const color = getRgbaColor();
-      if (!wrapSelection('color', color)) {
-        content.style.color = color;
-        content.querySelectorAll('span[style*="color"]').forEach((span) => {
-          span.style.color = color;
-        });
-        normalizeSpans();
-      }
+      if (!wrapSelection('color', color)) content.style.color = color;
     }
 
     function applyBackgroundColor() {
@@ -773,11 +908,6 @@ const themeToggle = document.getElementById('theme-toggle');
     function applyGlobalTextOpacity() {
       const contentColor = colorChannels(getComputedStyle(content).color);
       if (contentColor) content.style.color = rgbaFromChannels(contentColor);
-
-      content.querySelectorAll('span[style*="color"]').forEach((span) => {
-        const channels = colorChannels(getComputedStyle(span).color);
-        if (channels) span.style.color = rgbaFromChannels(channels);
-      });
     }
 
     decreaseFont.addEventListener('click', (event) => {
@@ -799,14 +929,18 @@ const themeToggle = document.getElementById('theme-toggle');
         && isRangeInEditor(savedRange)
       );
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-        if ((editorHasFocus || toolbarHasSelection)
-          && (event.shiftKey ? redoFormattingChange() : undoFormattingChange())) {
+        if (editorHasFocus || toolbarHasSelection) {
           event.preventDefault();
+          if (event.shiftKey) redoFormattingChange();
+          else undoFormattingChange();
         }
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-        if ((editorHasFocus || toolbarHasSelection) && redoFormattingChange()) event.preventDefault();
+        if (editorHasFocus || toolbarHasSelection) {
+          event.preventDefault();
+          redoFormattingChange();
+        }
         return;
       }
       const increase = event.key === '+' || event.key === '=' || event.code === 'NumpadAdd';
@@ -832,7 +966,7 @@ const themeToggle = document.getElementById('theme-toggle');
     });
 
     textColor.addEventListener('input', () => {
-      hasCustomTextColor = true;
+      updateCustomColorFlags();
       preservingToolbarSelection = true;
       suppressSelectionSync = true;
       applyTextColor();
@@ -842,8 +976,8 @@ const themeToggle = document.getElementById('theme-toggle');
       }, 0);
     });
     backgroundColor.addEventListener('input', () => {
-      hasCustomBackgroundColor = true;
       applyBackgroundColor();
+      updateCustomColorFlags();
       scheduleSave();
     });
     fontFamilyMenu.addEventListener('click', (event) => {
@@ -855,22 +989,25 @@ const themeToggle = document.getElementById('theme-toggle');
       recordFormattingChange();
       if (!wrapSelection('font-family', family)) {
         content.style.fontFamily = family;
-        content.querySelectorAll('span').forEach((span) => {
-          span.style.fontFamily = family;
-        });
-        normalizeSpans();
       }
-      fontFamilyMenu.classList.remove('is-open');
-      fontFamilyToggle.setAttribute('aria-expanded', 'false');
+      closeFontFamilyMenu();
       fontFamilyToggle.focus();
+      if (savedRange) {
+        preservingToolbarSelection = true;
+        restoreRange(savedRange);
+        setTimeout(() => {
+          preservingToolbarSelection = false;
+        }, 0);
+      }
     });
     fontFamilyToggle.addEventListener('click', () => {
-      const isOpen = fontFamilyMenu.classList.toggle('is-open');
-      fontFamilyToggle.setAttribute('aria-expanded', String(isOpen));
-      if (isOpen) {
-        const selectedOption = fontFamilyMenu.querySelector('[aria-selected="true"]');
-        (selectedOption || fontFamilyMenu.querySelector('.font-family-option')).focus();
+      if (fontFamilyMenu.classList.contains('is-open')) {
+        closeFontFamilyMenu();
+        return;
       }
+      openFontFamilyMenu();
+      const selectedOption = fontFamilyMenu.querySelector('[aria-selected="true"]');
+      (selectedOption || fontFamilyMenu.querySelector('.font-family-option')).focus();
     });
     fontFamilyToggle.addEventListener('keydown', (event) => {
       if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
@@ -883,8 +1020,7 @@ const themeToggle = document.getElementById('theme-toggle');
       const currentIndex = options.indexOf(document.activeElement);
       if (event.key === 'Escape') {
         event.preventDefault();
-        fontFamilyMenu.classList.remove('is-open');
-        fontFamilyToggle.setAttribute('aria-expanded', 'false');
+        closeFontFamilyMenu();
         fontFamilyToggle.focus();
       } else if (event.key === 'ArrowDown' && currentIndex < options.length - 1) {
         event.preventDefault();
@@ -898,8 +1034,7 @@ const themeToggle = document.getElementById('theme-toggle');
       const target = getEventTargetElement(event.target);
       if (!fontFamilyMenu.classList.contains('is-open')
         || (target && target.closest('.font-family-control'))) return;
-      fontFamilyMenu.classList.remove('is-open');
-      fontFamilyToggle.setAttribute('aria-expanded', 'false');
+      closeFontFamilyMenu();
     });
     let opacityChangeRecorded = false;
     textOpacity.addEventListener('pointerdown', () => {
@@ -915,8 +1050,8 @@ const themeToggle = document.getElementById('theme-toggle');
       opacityChangeRecorded = false;
     });
     textOpacity.addEventListener('input', () => {
-      hasCustomTextColor = true;
       opacityValue.textContent = `${textOpacity.value}%`;
+      updateCustomColorFlags();
       if (!opacityChangeRecorded) {
         recordFormattingChange();
         opacityChangeRecorded = true;
@@ -952,6 +1087,7 @@ const themeToggle = document.getElementById('theme-toggle');
 
     content.addEventListener('input', () => {
       if (restoringFormattingHistory) return;
+      updateEditorEmptyState();
       scheduleSave();
     });
 
@@ -963,17 +1099,30 @@ const themeToggle = document.getElementById('theme-toggle');
       attributeFilter: ['style']
     });
 
-    content.addEventListener('paste', (event) => {
-      const text = event.clipboardData && event.clipboardData.getData('text/plain');
-      if (text === null || text === undefined) return;
+    function editorInsertRange() {
+      const liveRange = getSelectedRange(false);
+      if (liveRange) return liveRange;
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      return range && isRangeInEditor(range) ? range : null;
+    }
 
-      event.preventDefault();
-      const range = getSelectedRange(false) || (() => {
-        const selection = window.getSelection();
-        return selection && selection.rangeCount ? selection.getRangeAt(0) : null;
-      })();
-      if (!range || !isRangeInEditor(range)) return;
+    function rangeFromPoint(x, y) {
+      if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+      if (document.caretPositionFromPoint) {
+        const position = document.caretPositionFromPoint(x, y);
+        if (!position) return null;
+        const range = document.createRange();
+        range.setStart(position.offsetNode, position.offset);
+        range.collapse(true);
+        return range;
+      }
+      return null;
+    }
 
+    function insertPlainText(text) {
+      const range = editorInsertRange();
+      if (!range) return;
       restoreRange(range);
       if (document.execCommand('insertText', false, text)) return;
 
@@ -986,11 +1135,34 @@ const themeToggle = document.getElementById('theme-toggle');
       range.insertNode(fragment);
       range.collapse(false);
       restoreRange(range);
+    }
+
+    content.addEventListener('paste', (event) => {
+      const text = event.clipboardData && event.clipboardData.getData('text/plain');
+      if (text === null || text === undefined) return;
+      event.preventDefault();
+      insertPlainText(text);
+    });
+
+    content.addEventListener('dragover', (event) => {
+      event.preventDefault();
+    });
+
+    content.addEventListener('drop', (event) => {
+      event.preventDefault();
+      const dropRange = rangeFromPoint(event.clientX, event.clientY);
+      if (dropRange && isRangeInEditor(dropRange)) restoreRange(dropRange);
+      const text = event.dataTransfer && event.dataTransfer.getData('text/plain');
+      if (text === null || text === undefined) return;
+      insertPlainText(text);
     });
 
     document.querySelector('.header-controls').addEventListener('pointerdown', (event) => {
       const target = getEventTargetElement(event.target);
-      if (target && target.closest('#font-family-toggle, .font-family-option')) return;
+      if (target && target.closest('#font-family-toggle, .font-family-option')) {
+        if (savedRange) preservingToolbarSelection = true;
+        return;
+      }
       if (!savedRange) return;
       preservingToolbarSelection = true;
       setTimeout(() => {
@@ -1018,9 +1190,7 @@ const themeToggle = document.getElementById('theme-toggle');
     themeToggle.addEventListener('click', () => {
       const isDark = document.body.classList.toggle('dark');
       document.documentElement.classList.toggle('dark', isDark);
-      if (!hasCustomTextColor) {
-        applyThemeTextColor(isDark ? '#ffffff' : '#000000');
-      }
+      if (!hasCustomTextColor) applyThemeTextColor(isDark ? DARK_TEXT_COLOR : LIGHT_TEXT_COLOR);
       if (!hasCustomBackgroundColor) applyThemeBackground(isDark);
       updateThemeToggle(isDark);
       scheduleSave();
@@ -1030,14 +1200,13 @@ const themeToggle = document.getElementById('theme-toggle');
     saveFile.addEventListener('click', downloadDocument);
 
     restoreDocument();
-    if (!hasCustomBackgroundColor) applyThemeBackground(document.body.classList.contains('dark'));
+    updateCustomColorFlags();
+    if (!hasCustomTextColor) applyThemeTextColor(themeTextColor());
+    if (!hasCustomBackgroundColor) applyThemeBackground(isDarkTheme());
     fontSize = clamp(Math.round(parseFloat(getComputedStyle(content).fontSize)), MIN_FONT_SIZE, MAX_FONT_SIZE);
     updateFontControls();
     setSelectedFontFamily(selectedFontFamily);
     applyBackgroundColor();
-    if (document.body.classList.contains('dark')) {
-      updateThemeToggle(true);
-    } else {
-      updateThemeToggle(false);
-    }
+    updateThemeToggle(isDarkTheme());
+    updateEditorEmptyState();
     content.focus();
