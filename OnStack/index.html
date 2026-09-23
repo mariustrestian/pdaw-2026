@@ -22,6 +22,34 @@
               aria-label="Save file" title="Download this document as an HTML file">
         <img class="header-action-icon" src="img/download_icon.svg" alt="" width="20" height="20">
       </button>
+      <span class="brand-divider" aria-hidden="true"></span>
+      <button id="find-toggle" class="header-action" type="button"
+              aria-label="Find and replace" title="Find and replace (Ctrl/Cmd+F)">
+        <svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="10.5" cy="10.5" r="6.5"></circle>
+          <line x1="15.5" y1="15.5" x2="21" y2="21"></line>
+        </svg>
+      </button>
+      <button id="details-toggle" class="header-action" type="button"
+              aria-label="Document details" title="Document details">
+        <svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"></circle>
+          <line x1="12" y1="11" x2="12" y2="17"></line>
+          <circle cx="12" cy="7.5" r="0.9" fill="currentColor" stroke="none"></circle>
+        </svg>
+      </button>
+      <button id="copy-document" class="header-action" type="button"
+              aria-label="Copy document to clipboard" title="Copy document to clipboard">
+        <svg class="header-action-icon" viewBox="0 0 24 24" aria-hidden="true"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="11" height="12" rx="1.5"></rect>
+          <path d="M5 15V4.5A1.5 1.5 0 0 1 6.5 3H15"></path>
+        </svg>
+      </button>
     </div>
 
     <div class="header-controls">
@@ -41,6 +69,12 @@
                aria-label="Text opacity" title="Text opacity">
         <span class="opacity-value" id="opacity-value">100%</span>
       </div>
+
+      <label class="highlight-color-control" title="Highlight color">
+        <span class="sr-only">Highlight color</span>
+        <input id="highlight-color" type="color" value="#ffe066"
+               aria-label="Choose highlight color">
+      </label>
 
       <label class="background-color-control">
         <span class="sr-only">Background color</span>
@@ -74,6 +108,18 @@
         </svg>
       </button>
     </div>
+
+    <div id="find-bar" class="find-bar" role="search" aria-label="Find and replace" aria-hidden="true">
+      <input id="find-input" type="text" placeholder="Find" aria-label="Find" autocomplete="off" spellcheck="false">
+      <span class="find-count" id="find-count">0/0</span>
+      <button id="find-prev" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)">↑</button>
+      <button id="find-next" type="button" aria-label="Next match" title="Next match (Enter)">↓</button>
+      <span class="find-divider" aria-hidden="true"></span>
+      <input id="replace-input" type="text" placeholder="Replace" aria-label="Replace with" autocomplete="off" spellcheck="false">
+      <button id="replace-one" type="button" title="Replace current match">Replace</button>
+      <button id="replace-all" type="button" title="Replace all matches">All</button>
+      <button id="find-close" type="button" aria-label="Close find bar" title="Close (Esc)">×</button>
+    </div>
   </header>
 
   <main>
@@ -104,6 +150,16 @@
         <rect x="1" y="5.4"  width="10" height="1.8" rx="0.9"/>
         <rect x="1" y="8.8"  width="14" height="1.8" rx="0.9"/>
         <rect x="1" y="12.2" width="8"  height="1.8" rx="0.9"/>
+      </svg>
+    </button>
+    <span class="selection-divider" aria-hidden="true"></span>
+    <button type="button" id="clear-formatting"
+            aria-label="Clear formatting" aria-keyshortcuts="Control+\ Meta+\"
+            title="Clear formatting (Ctrl/Cmd+\)">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M3.2 3h9.6v1.8H9.6V12H7.4V4.8H3.2Z"/>
+        <line x1="2.4" y1="13.4" x2="13.6" y2="13.4"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
       </svg>
     </button>
   </div>
@@ -150,6 +206,19 @@
       </svg>
       <span>Justify</span>
     </button>
+  </div>
+
+  <div id="details-overlay" class="details-overlay"
+       role="dialog" aria-modal="true" aria-labelledby="details-title"
+       aria-hidden="true">
+    <div class="details-dialog">
+      <div class="details-dialog-header">
+        <h2 id="details-title">Document Details</h2>
+        <button id="details-close" type="button" class="details-close"
+                aria-label="Close details">×</button>
+      </div>
+      <dl class="details-list" id="details-list"></dl>
+    </div>
   </div>
 
   <div id="status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>

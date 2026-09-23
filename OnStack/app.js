@@ -6,12 +6,29 @@ const fontSizeValue = document.getElementById('font-size-value');
 const textColor = document.getElementById('text-color');
 const textOpacity = document.getElementById('text-opacity');
 const opacityValue = document.getElementById('opacity-value');
+const highlightColor = document.getElementById('highlight-color');
 const fontFamilyToggle = document.getElementById('font-family-toggle');
 const fontFamilyMenu = document.getElementById('font-family-menu');
 const backgroundColor = document.getElementById('background-color');
 const restoreDefaults = document.getElementById('restore-defaults');
 const saveFile = document.getElementById('save-file');
+const findToggle = document.getElementById('find-toggle');
+const findBar = document.getElementById('find-bar');
+const findInput = document.getElementById('find-input');
+const findCount = document.getElementById('find-count');
+const findPrev = document.getElementById('find-prev');
+const findNext = document.getElementById('find-next');
+const replaceInput = document.getElementById('replace-input');
+const replaceOne = document.getElementById('replace-one');
+const replaceAll = document.getElementById('replace-all');
+const findClose = document.getElementById('find-close');
+const detailsToggle = document.getElementById('details-toggle');
+const detailsOverlay = document.getElementById('details-overlay');
+const detailsClose = document.getElementById('details-close');
+const detailsList = document.getElementById('details-list');
+const copyDocument = document.getElementById('copy-document');
 const selectionPanel = document.getElementById('selection-panel');
+const clearFormattingBtn = document.getElementById('clear-formatting');
 const alignmentButton = document.getElementById('alignment-button');
 const alignmentMenu = document.getElementById('alignment-menu');
 const logoLink = document.querySelector('.logo');
@@ -26,6 +43,7 @@ const LIGHT_BACKGROUND_COLOR = '#ffffff';
 const DARK_BACKGROUND_COLOR = '#1f1f1f';
 const STORAGE_KEY = 'onstack-document';
 const MAX_HISTORY_ENTRIES = 100;
+const READING_WORDS_PER_MINUTE = 200;
 
 const formattingProperties = [
   'font-size', 'font-family', 'color', 'background-color',
@@ -39,7 +57,7 @@ const ALLOWED_CONTENT_PROPS = [
 ];
 const FORBIDDEN_TAGS = new Set([
   'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'STYLE',
-  'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT'
+  'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'MARK'
 ]);
 
 const ALIGNMENT_BLOCK_TAGS = new Set([
@@ -76,6 +94,12 @@ let selectedFontFamily = fontFamilies[0];
 let pendingColorSnapshot = null;
 let opacityChangeRecorded = false;
 let statusTimer = null;
+let lastSavedAt = null;
+let findState = {
+  active: false,
+  matches: [],
+  currentIndex: -1
+};
 
 /* ---------- Utilities ---------- */
 
@@ -115,6 +139,30 @@ function announceStatus(message) {
   }, 60);
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / Math.pow(1024, exponent);
+  return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+}
+
+function formatTimestamp(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const now = Date.now();
+  const diff = now - ts;
+  if (diff < 30000) return 'Just now';
+  if (diff < 60000) return `${Math.round(diff / 1000)} seconds ago`;
+  if (diff < 3600000) return `${Math.round(diff / 60000)} minutes ago`;
+  if (diff < 86400000) return `${Math.round(diff / 3600000)} hours ago`;
+  return d.toLocaleString();
+}
+
 /* ---------- Sanitization ---------- */
 
 function sanitizeStyleValue(styleText, allowedProps) {
@@ -144,7 +192,11 @@ function sanitizeEditorHtml(html) {
   template.innerHTML = html;
   template.content.querySelectorAll('*').forEach((element) => {
     if (FORBIDDEN_TAGS.has(element.tagName)) {
-      element.remove();
+      if (element.tagName === 'MARK') {
+        element.replaceWith(...element.childNodes);
+      } else {
+        element.remove();
+      }
       return;
     }
     [...element.attributes].forEach((attribute) => {
@@ -204,11 +256,13 @@ function saveDocument() {
       textColor: textColor.value,
       textOpacity: textOpacity.value,
       backgroundColor: backgroundColor.value,
+      highlightColor: highlightColor.value,
       darkTheme: isDarkTheme(),
       hasCustomTextColor,
       hasCustomBackgroundColor,
       selectedFontFamily
     }));
+    lastSavedAt = Date.now();
   } catch (error) {
     console.error('OnStack could not save the document.', error);
     if (error && (error.name === 'QuotaExceededError' || error.code === 22)) {
@@ -241,6 +295,7 @@ function restoreDocument() {
     if (typeof saved.textColor === 'string') textColor.value = saved.textColor;
     if (typeof saved.textOpacity === 'string') textOpacity.value = saved.textOpacity;
     if (typeof saved.backgroundColor === 'string') backgroundColor.value = saved.backgroundColor;
+    if (typeof saved.highlightColor === 'string') highlightColor.value = saved.highlightColor;
 
     hasCustomTextColor = saved.hasCustomTextColor === true;
     if (typeof saved.hasCustomBackgroundColor === 'boolean') {
@@ -273,6 +328,7 @@ function restoreDocument() {
 
 function restoreDefaultDocument() {
   flushPendingColorSnapshot();
+  clearFindHighlights();
   suppressPersistence = true;
   clearTimeout(persistenceTimer);
   persistenceTimer = null;
@@ -288,10 +344,12 @@ function restoreDefaultDocument() {
   textOpacity.value = '100';
   opacityValue.textContent = '100%';
   backgroundColor.value = '#ffffff';
+  highlightColor.value = '#ffe066';
   fontSize = DEFAULT_FONT_SIZE;
   hasCustomTextColor = false;
   hasCustomBackgroundColor = false;
   selectedFontFamily = fontFamilies[0];
+  lastSavedAt = null;
 
   document.body.classList.remove('dark');
   document.documentElement.classList.remove('dark');
@@ -331,6 +389,7 @@ function applyThemeBackground(isDark) {
 /* ---------- Export ---------- */
 
 function downloadDocument() {
+  clearFindHighlights();
   const computed = getComputedStyle(content);
   const exportedStyles = [
     'box-sizing: border-box',
@@ -362,6 +421,50 @@ function downloadDocument() {
   link.download = 'onstack-document.html';
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+/* ---------- Copy to clipboard ---------- */
+
+async function copyDocumentToClipboard() {
+  clearFindHighlights();
+  const html = sanitizeEditorHtml(content.innerHTML);
+  const text = content.textContent;
+
+  try {
+    if (navigator.clipboard && typeof window.ClipboardItem === 'function') {
+      const item = new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' })
+      });
+      await navigator.clipboard.write([item]);
+      announceStatus('Copied document to clipboard.');
+      return;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      announceStatus('Copied document as plain text.');
+      return;
+    }
+  } catch (error) {
+    console.warn('Clipboard API failed, using fallback.', error);
+  }
+
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (ok) announceStatus('Copied document as plain text.');
+    else announceStatus('Copy failed.');
+  } catch (error) {
+    console.error('Copy failed.', error);
+    announceStatus('Copy failed.');
+  }
 }
 
 /* ---------- Font menu ---------- */
@@ -409,11 +512,6 @@ function closeAlignmentMenu() {
   alignmentButton.setAttribute('aria-expanded', 'false');
 }
 
-/**
- * Recompute the alignment menu's fixed position based on the current
- * location of the alignment button. Safe to call at any time — it does
- * nothing if the menu is not open.
- */
 function updateAlignmentMenuPosition() {
   if (!alignmentMenu.classList.contains('is-open')) return;
   const buttonRect = alignmentButton.getBoundingClientRect();
@@ -436,9 +534,6 @@ function openAlignmentMenu() {
   updateAlignmentMenuState();
 }
 
-/**
- * Returns the block-level ancestors inside #content that intersect the range.
- */
 function alignmentBlocksForRange(range) {
   if (!range) return [];
   const blocks = new Set();
@@ -468,11 +563,6 @@ function alignmentBlocksForRange(range) {
   return [...blocks];
 }
 
-/**
- * Walk up from `node` to the direct child of `root` that contains it.
- * When `node` is `root` itself, uses `offset` to pick the child. Returns
- * null if the node is not inside root.
- */
 function topLevelChildOf(root, node, offset) {
   if (!node) return null;
   if (node === root) {
@@ -513,9 +603,6 @@ function applyAlignment(alignment) {
     return true;
   }
 
-  // No block ancestor: wrap the intersecting top-level children of #content
-  // in a <div> so text-align is scoped to those lines only, instead of
-  // silently aligning the whole document.
   try {
     const startChild = topLevelChildOf(content, range.startContainer, range.startOffset);
     const endChild = topLevelChildOf(content, range.endContainer, range.endOffset);
@@ -540,7 +627,6 @@ function applyAlignment(alignment) {
     console.warn('Alignment wrap failed; falling back to whole-editor alignment.', error);
   }
 
-  // Last resort: apply to the whole editor (matches previous behavior).
   content.style.textAlign = alignment;
   return true;
 }
@@ -665,8 +751,6 @@ function captureFormattingSnapshot() {
 }
 
 function pushFormattingSnapshot(snapshot) {
-  // If a color-picker interaction is still "in progress", commit its
-  // starting snapshot first so the color change becomes its own undo step.
   if (pendingColorSnapshot) {
     formattingUndoStack.push(pendingColorSnapshot);
     pendingColorSnapshot = null;
@@ -681,6 +765,7 @@ function pushFormattingSnapshot(snapshot) {
 
 function recordFormattingChange() {
   if (restoringFormattingHistory) return;
+  clearFindHighlights();
   pushFormattingSnapshot(captureFormattingSnapshot());
 }
 
@@ -731,6 +816,7 @@ function restoreFormattingSnapshot(snapshot) {
 
 function undoFormattingChange() {
   flushPendingColorSnapshot();
+  clearFindHighlights();
   if (!formattingUndoStack.length) return false;
   formattingRedoStack.push(captureFormattingSnapshot());
   restoreFormattingSnapshot(formattingUndoStack.pop());
@@ -738,6 +824,7 @@ function undoFormattingChange() {
 }
 
 function redoFormattingChange() {
+  clearFindHighlights();
   if (!formattingRedoStack.length) return false;
   formattingUndoStack.push(captureFormattingSnapshot());
   restoreFormattingSnapshot(formattingRedoStack.pop());
@@ -749,6 +836,14 @@ function redoFormattingChange() {
 function removeInlineProperty(fragment, property) {
   fragment.querySelectorAll('[style]').forEach((element) => {
     element.style.removeProperty(property);
+    if (!element.style.length) element.removeAttribute('style');
+  });
+}
+
+function stripAllInlineProperties(fragment) {
+  fragment.querySelectorAll('[style]').forEach((element) => {
+    formattingProperties.forEach((property) => element.style.removeProperty(property));
+    element.style.removeProperty('text-align');
     if (!element.style.length) element.removeAttribute('style');
   });
 }
@@ -862,6 +957,31 @@ function wrapSelection(property, value) {
   range.insertNode(span);
   range.selectNodeContents(span);
   normalizeSpansPreservingRange(range);
+  return true;
+}
+
+/* ---------- Clear formatting ---------- */
+
+function clearFormattingOnSelection() {
+  const range = getSelectedRange();
+  if (!range) {
+    announceStatus('Select text to clear its formatting.');
+    return false;
+  }
+  recordFormattingChange();
+  const fragment = range.extractContents();
+  stripAllInlineProperties(fragment);
+  const firstNode = fragment.firstChild;
+  const lastNode = fragment.lastChild;
+  range.insertNode(fragment);
+  if (firstNode && lastNode) {
+    const newRange = document.createRange();
+    newRange.setStartBefore(firstNode);
+    newRange.setEndAfter(lastNode);
+    restoreRange(newRange);
+  }
+  normalizeSpans();
+  announceStatus('Formatting cleared.');
   return true;
 }
 
@@ -1173,6 +1293,17 @@ function applyTextColor() {
   if (!wrapSelection('color', color)) content.style.color = color;
 }
 
+function applyHighlightColor() {
+  const color = highlightColor.value;
+  const range = getSelectedRange();
+  if (!range) {
+    announceStatus('Select text to highlight.');
+    return;
+  }
+  recordFormattingChange();
+  wrapSelection('background-color', color);
+}
+
 function applyBackgroundColor() {
   content.style.backgroundColor = backgroundColor.value;
 }
@@ -1182,14 +1313,257 @@ function applyGlobalTextOpacity() {
   if (contentColor) content.style.color = rgbaFromChannels(contentColor);
 }
 
-/**
- * Commit any pending color-picker snapshot to the undo stack. Safe to call
- * at any time; does nothing if there is no pending snapshot.
- */
 function flushPendingColorSnapshot() {
   if (!pendingColorSnapshot) return;
   pushFormattingSnapshot(pendingColorSnapshot);
   pendingColorSnapshot = null;
+}
+
+/* ---------- Find and replace ---------- */
+
+function clearFindHighlights() {
+  const marks = content.querySelectorAll('mark.find-highlight');
+  if (!marks.length) {
+    findState.matches = [];
+    findState.currentIndex = -1;
+    updateFindCount();
+    return;
+  }
+  marks.forEach((mark) => {
+    const parent = mark.parentNode;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+  });
+  content.normalize();
+  findState.matches = [];
+  findState.currentIndex = -1;
+  updateFindCount();
+}
+
+function updateFindCount() {
+  if (!findCount) return;
+  const total = findState.matches.length;
+  const current = total && findState.currentIndex >= 0 ? findState.currentIndex + 1 : 0;
+  findCount.textContent = `${current}/${total}`;
+}
+
+function performFind(query) {
+  clearFindHighlights();
+  const trimmed = String(query || '');
+  if (!trimmed) {
+    updateFindCount();
+    return;
+  }
+
+  const pattern = new RegExp(escapeRegExp(trimmed), 'gi');
+
+  const textNodes = [];
+  const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node.parentElement && node.parentElement.dataset.selectionMarker) continue;
+    if (node.textContent) textNodes.push(node);
+  }
+
+  textNodes.forEach((textNode) => {
+    const text = textNode.textContent;
+    const matches = [];
+    let match;
+    pattern.lastIndex = 0;
+    while ((match = pattern.exec(text)) !== null) {
+      matches.push({ index: match.index, length: match[0].length });
+      if (match[0].length === 0) pattern.lastIndex += 1;
+    }
+    if (!matches.length) return;
+
+    const parent = textNode.parentNode;
+    if (!parent) return;
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    matches.forEach((m) => {
+      if (m.index > lastIndex) {
+        fragment.appendChild(document.createTextNode(text.slice(lastIndex, m.index)));
+      }
+      const mark = document.createElement('mark');
+      mark.className = 'find-highlight';
+      mark.textContent = text.slice(m.index, m.index + m.length);
+      fragment.appendChild(mark);
+      findState.matches.push(mark);
+      lastIndex = m.index + m.length;
+    });
+    if (lastIndex < text.length) {
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+    parent.replaceChild(fragment, textNode);
+  });
+
+  if (findState.matches.length) {
+    findState.currentIndex = 0;
+    focusFindMatch(0);
+  } else {
+    findState.currentIndex = -1;
+  }
+  updateFindCount();
+}
+
+function focusFindMatch(index) {
+  if (index < 0 || index >= findState.matches.length) return;
+  findState.currentIndex = index;
+  findState.matches.forEach((mark, i) => {
+    mark.classList.toggle('is-current', i === index);
+  });
+  const current = findState.matches[index];
+  if (current) {
+    current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const range = document.createRange();
+    range.selectNodeContents(current);
+    try {
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      savedRange = range.cloneRange();
+    } catch (error) {
+      // Ignore — visual highlight still applies.
+    }
+  }
+  updateFindCount();
+}
+
+function navigateFind(direction) {
+  if (!findState.matches.length) return;
+  const total = findState.matches.length;
+  let next = findState.currentIndex + direction;
+  if (next < 0) next = total - 1;
+  if (next >= total) next = 0;
+  focusFindMatch(next);
+}
+
+function replaceCurrentMatch() {
+  if (!findState.matches.length) return;
+  if (findState.currentIndex < 0) findState.currentIndex = 0;
+  const mark = findState.matches[findState.currentIndex];
+  if (!mark || !mark.parentNode) return;
+  const replacement = replaceInput.value;
+
+  recordFormattingChange();
+  const parent = mark.parentNode;
+  const textNode = document.createTextNode(replacement);
+  parent.replaceChild(textNode, mark);
+  parent.normalize();
+
+  const query = findInput.value;
+  performFind(query);
+}
+
+function replaceAllMatches() {
+  if (!findState.matches.length) return;
+  const replacement = replaceInput.value;
+  recordFormattingChange();
+  const marks = [...findState.matches];
+  marks.forEach((mark) => {
+    if (!mark.parentNode) return;
+    const parent = mark.parentNode;
+    const textNode = document.createTextNode(replacement);
+    parent.replaceChild(textNode, mark);
+    parent.normalize();
+  });
+  announceStatus(`Replaced ${marks.length} match${marks.length === 1 ? '' : 'es'}.`);
+  performFind(findInput.value);
+}
+
+function openFindBar() {
+  if (!findBar.classList.contains('is-open')) {
+    findBar.classList.add('is-open');
+    findBar.setAttribute('aria-hidden', 'false');
+    findToggle.setAttribute('aria-pressed', 'true');
+    suppressPersistence = true;
+  }
+  findInput.focus();
+  findInput.select();
+  if (findInput.value) performFind(findInput.value);
+}
+
+function closeFindBar() {
+  if (!findBar.classList.contains('is-open')) return;
+  findBar.classList.remove('is-open');
+  findBar.setAttribute('aria-hidden', 'true');
+  findToggle.setAttribute('aria-pressed', 'false');
+  clearFindHighlights();
+  findState.currentIndex = -1;
+  updateFindCount();
+  suppressPersistence = false;
+  saveDocument();
+  content.focus();
+}
+
+/* ---------- Details panel ---------- */
+
+function collectDocumentDetails() {
+  const rawText = content.textContent.replace(/\u00a0/g, ' ');
+  const trimmed = rawText.trim();
+  const words = trimmed ? trimmed.split(/\s+/).length : 0;
+  const characters = rawText.length;
+  const charactersNoSpaces = rawText.replace(/\s/g, '').length;
+  const sentences = (rawText.match(/[^\s.!?][^.!?]*[.!?]+/g) || []).length
+    || (trimmed ? 1 : 0);
+  const paragraphCount = (() => {
+    const blocks = content.querySelectorAll('p, div');
+    if (blocks.length) return blocks.length;
+    return trimmed ? rawText.split(/\n{2,}/).filter((p) => p.trim()).length || 1 : 0;
+  })();
+  const lines = rawText ? rawText.split(/\n/).length : 0;
+  const readingMinutes = words ? Math.max(1, Math.round(words / READING_WORDS_PER_MINUTE)) : 0;
+
+  const html = sanitizeEditorHtml(content.innerHTML);
+  const byteSize = new Blob([html]).size;
+
+  let title = 'Untitled';
+  const heading = content.querySelector('h1, h2, h3');
+  if (heading && heading.textContent.trim()) {
+    title = heading.textContent.trim().slice(0, 80);
+  } else if (trimmed) {
+    const firstLine = trimmed.split('\n')[0];
+    title = firstLine.slice(0, 80);
+  }
+
+  return [
+    ['Title', title],
+    ['Words', words.toLocaleString()],
+    ['Characters', characters.toLocaleString()],
+    ['Characters (no spaces)', charactersNoSpaces.toLocaleString()],
+    ['Sentences', sentences.toLocaleString()],
+    ['Paragraphs', paragraphCount.toLocaleString()],
+    ['Lines', lines.toLocaleString()],
+    ['Reading time', readingMinutes ? `${readingMinutes} min` : '—'],
+    ['Storage size', formatBytes(byteSize)],
+    ['Last saved', lastSavedAt ? formatTimestamp(lastSavedAt) : 'Not saved yet']
+  ];
+}
+
+function renderDetailsList() {
+  if (!detailsList) return;
+  detailsList.innerHTML = '';
+  collectDocumentDetails().forEach(([label, value]) => {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    detailsList.appendChild(dt);
+    detailsList.appendChild(dd);
+  });
+}
+
+function openDetailsPanel() {
+  renderDetailsList();
+  detailsOverlay.classList.add('is-open');
+  detailsOverlay.setAttribute('aria-hidden', 'false');
+  if (detailsClose) detailsClose.focus();
+}
+
+function closeDetailsPanel() {
+  if (!detailsOverlay.classList.contains('is-open')) return;
+  detailsOverlay.classList.remove('is-open');
+  detailsOverlay.setAttribute('aria-hidden', 'true');
 }
 
 /* ---------- Selection observer ---------- */
@@ -1217,7 +1591,7 @@ document.addEventListener('selectionchange', () => {
 
 selectionPanel.addEventListener('pointerdown', (event) => {
   const target = getEventTargetElement(event.target);
-  if (target && target.closest('button[data-style-property], #alignment-button')) {
+  if (target && target.closest('button[data-style-property], #alignment-button, #clear-formatting')) {
     preservingToolbarSelection = true;
   }
 });
@@ -1233,6 +1607,14 @@ selectionPanel.addEventListener('click', (event) => {
       if (savedRange) preservingToolbarSelection = true;
       openAlignmentMenu();
     }
+    return;
+  }
+
+  const clearBtn = target && target.closest('#clear-formatting');
+  if (clearBtn) {
+    clearFormattingOnSelection();
+    updateSelectionPanel(getSelectedRange());
+    setTimeout(() => { preservingToolbarSelection = false; }, 0);
     return;
   }
 
@@ -1349,6 +1731,34 @@ window.addEventListener('keydown', (event) => {
 
   const key = event.key.toLowerCase();
 
+  if (event.key === 'Escape') {
+    if (detailsOverlay.classList.contains('is-open')) {
+      event.preventDefault();
+      closeDetailsPanel();
+      return;
+    }
+    if (findBar.classList.contains('is-open')) {
+      event.preventDefault();
+      closeFindBar();
+      return;
+    }
+  }
+
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && key === 'f') {
+    event.preventDefault();
+    openFindBar();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === '\\' || event.code === 'Backslash')) {
+    if (getSelectedRange()) {
+      event.preventDefault();
+      clearFormattingOnSelection();
+      updateSelectionPanel(getSelectedRange());
+    }
+    return;
+  }
+
   if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.altKey) {
     if (editorHasFocus || toolbarHasSelection) {
       event.preventDefault();
@@ -1385,6 +1795,55 @@ window.addEventListener('keydown', (event) => {
   changeFontSize((increase ? 1 : -1) * (event.shiftKey ? 5 : 1));
 }, true);
 
+/* ---------- Find bar events ---------- */
+
+findToggle.addEventListener('click', () => {
+  if (findBar.classList.contains('is-open')) closeFindBar();
+  else openFindBar();
+});
+
+findClose.addEventListener('click', () => {
+  closeFindBar();
+});
+
+findInput.addEventListener('input', () => {
+  performFind(findInput.value);
+});
+
+findInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    navigateFind(event.shiftKey ? -1 : 1);
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    closeFindBar();
+  }
+});
+
+findNext.addEventListener('click', () => navigateFind(1));
+findPrev.addEventListener('click', () => navigateFind(-1));
+replaceOne.addEventListener('click', () => replaceCurrentMatch());
+replaceAll.addEventListener('click', () => replaceAllMatches());
+
+/* ---------- Details panel events ---------- */
+
+detailsToggle.addEventListener('click', () => {
+  if (detailsOverlay.classList.contains('is-open')) closeDetailsPanel();
+  else openDetailsPanel();
+});
+
+detailsClose.addEventListener('click', closeDetailsPanel);
+
+detailsOverlay.addEventListener('click', (event) => {
+  if (event.target === detailsOverlay) closeDetailsPanel();
+});
+
+/* ---------- Copy button ---------- */
+
+copyDocument.addEventListener('click', () => {
+  copyDocumentToClipboard();
+});
+
 /* ---------- Color inputs ---------- */
 
 textColor.addEventListener('input', () => {
@@ -1401,6 +1860,16 @@ textColor.addEventListener('input', () => {
 textColor.addEventListener('change', flushPendingColorSnapshot);
 textColor.addEventListener('blur', flushPendingColorSnapshot);
 textColor.addEventListener('pointerup', flushPendingColorSnapshot);
+
+highlightColor.addEventListener('input', () => {
+  preservingToolbarSelection = true;
+  suppressSelectionSync = true;
+  applyHighlightColor();
+  setTimeout(() => {
+    preservingToolbarSelection = false;
+    suppressSelectionSync = false;
+  }, 0);
+});
 
 backgroundColor.addEventListener('input', () => {
   applyBackgroundColor();
@@ -1464,9 +1933,6 @@ fontFamilyToggle.addEventListener('click', () => {
   (selectedOption || fontFamilyMenu.querySelector('.font-family-option')).focus();
 });
 
-// Only handle ArrowDown — Enter/Space already fire a click on the button,
-// and our earlier handling of them caused the menu to open and then
-// immediately close in some browsers.
 fontFamilyToggle.addEventListener('keydown', (event) => {
   if (event.key === 'ArrowDown') {
     event.preventDefault();
@@ -1507,8 +1973,6 @@ fontFamilyMenu.addEventListener('keydown', (event) => {
   }
 });
 
-// Wait a beat before closing on focusout so a click on an option is not
-// pre-empted by the menu closing under the pointer (Safari).
 fontFamilyMenu.addEventListener('focusout', (event) => {
   const next = event.relatedTarget;
   if (next && fontFamilyMenu.contains(next)) return;
@@ -1637,8 +2101,6 @@ content.addEventListener('mouseup', () => {
 content.addEventListener('scroll', () => {
   const range = currentSelection();
   if (range) updateSelectionPanel(range);
-  // Keep the alignment dropdown anchored to its button when the editor
-  // scrolls (previously it stayed put and drifted away from the panel).
   updateAlignmentMenuPosition();
 });
 
