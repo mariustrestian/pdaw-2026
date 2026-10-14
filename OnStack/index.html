@@ -9,6 +9,7 @@
 </head>
 <body>
   <header>
+    <h1 class="sr-only">OnStack Text Editor</h1>
     <div class="brand-actions">
       <a class="logo" href="#" aria-label="OnStack home" title="Back to top">
         <img class="logo-img" src="img/onstack_rabbit_logo.svg"
@@ -62,7 +63,7 @@
              role="menu" aria-label="Font family"></div>
       </div>
 
-      <div class="text-color-control" aria-label="Text color">
+      <div class="text-color-control" role="group" aria-label="Text color">
         <input id="text-color" type="color" value="#000000"
                aria-label="Choose text color" title="Text color">
         <input id="text-opacity" type="range" min="0" max="100" value="100"
@@ -82,7 +83,7 @@
                aria-label="Choose background color" title="Background color">
       </label>
 
-      <div class="font-size-control" aria-label="Font size">
+      <div class="font-size-control" role="group" aria-label="Font size">
         <button id="decrease-font" type="button"
                 aria-label="Decrease font size"
                 title="Decrease 1px. Alt + -; hold Shift for 5px.">
